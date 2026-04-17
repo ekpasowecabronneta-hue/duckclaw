@@ -1,23 +1,36 @@
-# ResearchWorker — Agente de Investigación Activa (Tavily + Browser-Use)
-# Spec: specs/Pipeline_de_Investigación_y_Navegacion_Autonoma_(Tavily+Browser-Use).md
-# Inferencia Elástica: specs/Inferencia_Elastica_(Hardware-Aware).md
-name: ResearchWorker
-id: research_worker
-schema_name: research_worker
+name: QuantTraderWorker
+id: quant_trader
+schema_name: finance_worker
 topology: general
-read_only: false
+read_only: true
+risk_level: conservative
+quant:
+  enabled: true
+network_access: false
+browser_sandbox: false
+allowed_tables:
+  - finance_worker.trading_mandates
+  - finance_worker.trade_signals
+  - finance_worker.cuentas
+  - quant_core.ohlcv_data
+  - quant_core.trading_sessions
+  - quant_core.trading_risk_constraints
 llm:
   required: true
-  temperature: 0.3
-inference:
-  fallback_to_cloud: true
-  cloud_provider: groq
-  cloud_model: llama-3.3-70b-versatile
+  temperature: 0.1
 skills:
+  - read_sql
+  - ibkr: {}  # get_ibkr_portfolio: mismo contrato que Finanz (IBKR_PORTFOLIO_API_URL; paper/live vía IBKR_ACCOUNT_MODE)
+  - fetch_market_data
+  - fetch_ib_gateway_ohlcv
+  - tavily_search
   - research:
       tavily_enabled: true
-      browser_enabled: false  # Phase 2: requiere Strix + Playwright en Docker
       audit_langsmith: true
       search_depth: advanced
       include_answer: true
-      max_results: 10
+      max_results: 8
+      include_raw_content: false
+  - execute_sandbox_script
+  - propose_trade_signal
+  - execute_approved_signal

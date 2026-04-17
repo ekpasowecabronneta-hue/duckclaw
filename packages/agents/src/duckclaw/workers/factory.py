@@ -1513,6 +1513,15 @@ def build_worker_graph(
         except Exception:
             pass
 
+    if getattr(spec, "openweather_config", None) is not None:
+        try:
+            from duckclaw.forge.skills.openweather_bridge import register_openweather_skill
+
+            register_openweather_skill(tools, spec.openweather_config, getattr(spec, "research_config", None))
+            tools_by_name = {t.name: t for t in tools}
+        except Exception:
+            pass
+
     if getattr(spec, "tailscale_config", None):
         try:
             from duckclaw.forge.skills.tailscale_bridge import register_tailscale_skill
@@ -1525,6 +1534,15 @@ def build_worker_graph(
         try:
             from duckclaw.forge.skills.ibkr_bridge import register_ibkr_skill
             register_ibkr_skill(tools, spec.ibkr_config)
+            tools_by_name = {t.name: t for t in tools}
+        except Exception:
+            pass
+
+    if getattr(spec, "fmp_config", None) is not None:
+        try:
+            from duckclaw.forge.skills.fmp_bridge import register_fmp_skill
+
+            register_fmp_skill(tools, spec.fmp_config)
             tools_by_name = {t.name: t for t in tools}
         except Exception:
             pass
@@ -1816,6 +1834,8 @@ def build_worker_graph(
         llm_with_tools_off = _bind_tools(llm, _tools_sandbox_off_bind)
 
         has_ibkr = "get_ibkr_portfolio" in tools_by_name
+        has_fmp_stock = "get_fmp_stock_dividends" in tools_by_name
+        has_fmp_calendar = "get_fmp_dividends_calendar" in tools_by_name
         has_read_sql = "read_sql" in tools_by_name
         has_admin_sql = "admin_sql" in tools_by_name
         has_run_sandbox = "run_sandbox" in tools_by_name
@@ -1823,6 +1843,8 @@ def build_worker_graph(
         tool_choice_read_sql = {"type": "function", "function": {"name": "read_sql"}}
         tool_choice_admin_sql = {"type": "function", "function": {"name": "admin_sql"}}
         tool_choice_portfolio = {"type": "function", "function": {"name": "get_ibkr_portfolio"}}
+        tool_choice_fmp_stock = {"type": "function", "function": {"name": "get_fmp_stock_dividends"}}
+        tool_choice_fmp_calendar = {"type": "function", "function": {"name": "get_fmp_dividends_calendar"}}
         tool_choice_run_sandbox = {"type": "function", "function": {"name": "run_sandbox"}}
 
         llm_force_schema_on = _bind_tools(llm, _tools_for_llm_bind, tool_choice=tool_choice_inspect_schema)
@@ -1844,6 +1866,24 @@ def build_worker_graph(
         )
         llm_force_portfolio_off = (
             _bind_tools(llm, _tools_sandbox_off_bind, tool_choice=tool_choice_portfolio) if has_ibkr else None
+        )
+        llm_force_fmp_stock_on = (
+            _bind_tools(llm, _tools_for_llm_bind, tool_choice=tool_choice_fmp_stock) if has_fmp_stock else None
+        )
+        llm_force_fmp_stock_off = (
+            _bind_tools(llm, _tools_sandbox_off_bind, tool_choice=tool_choice_fmp_stock)
+            if has_fmp_stock
+            else None
+        )
+        llm_force_fmp_calendar_on = (
+            _bind_tools(llm, _tools_for_llm_bind, tool_choice=tool_choice_fmp_calendar)
+            if has_fmp_calendar
+            else None
+        )
+        llm_force_fmp_calendar_off = (
+            _bind_tools(llm, _tools_sandbox_off_bind, tool_choice=tool_choice_fmp_calendar)
+            if has_fmp_calendar
+            else None
         )
         llm_force_run_sandbox_on = (
             _bind_tools(llm, _tools_for_llm_bind, tool_choice=tool_choice_run_sandbox)
@@ -2057,6 +2097,22 @@ def build_worker_graph(
                 return True
             return bool(re.search(r"\bacciones\b", t))
 
+        def _is_dividends_query(text: str) -> bool:
+            if not text or not text.strip():
+                return False
+            t = text.strip().lower()
+            return any(
+                k in t
+                for k in (
+                    "dividendo",
+                    "dividendos",
+                    "ex-div",
+                    "ex dividend",
+                    "record date",
+                    "payment date",
+                )
+            )
+
         def _is_schema_query(text: str) -> bool:
             if not text or not text.strip():
                 return False
@@ -2203,6 +2259,18 @@ def build_worker_graph(
                 )
             )
             force_portfolio = force_portfolio_first or force_portfolio_after_local_cuentas
+            is_dividends = _is_dividends_query(incoming)
+            force_fmp = bool(
+                is_dividends and not already_has_tool_result and (has_fmp_stock or has_fmp_calendar)
+            )
+            force_fmp_calendar = bool(
+                force_fmp
+                and has_fmp_calendar
+                and any(
+                    k in (incoming or "").strip().lower()
+                    for k in ("próximos", "proximos", "calendario", "between", "entre")
+                )
+            )
 
             jh_fast_text: str | None = None
             if _spec_is_job_hunter() and not already_has_tool_result:
@@ -2264,7 +2332,14 @@ def build_worker_graph(
                 and has_reddit_tools
                 and _reddit_anchor_u is not None
                 and not summarize_stored_directive
-                and not (force_schema or force_admin_sql or force_read_sql or force_portfolio or force_tavily)
+                and not (
+                    force_schema
+                    or force_admin_sql
+                    or force_read_sql
+                    or force_portfolio
+                    or force_fmp
+                    or force_tavily
+                )
                 and (not already_has_tool_result or need_share_followup)
             )
 
@@ -2279,6 +2354,8 @@ def build_worker_graph(
                 ):
                     force_read_sql = False
                 force_portfolio = False
+                force_fmp = False
+                force_fmp_calendar = False
                 force_tavily = False
                 force_reddit = False
 
@@ -2432,18 +2509,26 @@ def build_worker_graph(
                             "get_ibkr_portfolio"
                             if force_portfolio
                             else (
-                                "tavily_search"
-                                if force_tavily
+                                "get_fmp_dividends_calendar"
+                                if force_fmp and force_fmp_calendar
                                 else (
-                                    "reddit"
-                                    if force_reddit
+                                    "get_fmp_stock_dividends"
+                                    if force_fmp
                                     else (
-                                        "fetch_ib_gateway_ohlcv"
-                                        if force_fetch_ib_gateway
+                                        "tavily_search"
+                                        if force_tavily
                                         else (
-                                            "fetch_market_data"
-                                            if force_fetch_market_data
-                                            else ("run_sandbox" if force_run_sandbox else "auto")
+                                            "reddit"
+                                            if force_reddit
+                                            else (
+                                                "fetch_ib_gateway_ohlcv"
+                                                if force_fetch_ib_gateway
+                                                else (
+                                                    "fetch_market_data"
+                                                    if force_fetch_market_data
+                                                    else ("run_sandbox" if force_run_sandbox else "auto")
+                                                )
+                                            )
                                         )
                                     )
                                 )
@@ -2493,6 +2578,13 @@ def build_worker_graph(
             elif force_portfolio:
                 _forced_pf = llm_force_portfolio_on if sandbox_enabled else llm_force_portfolio_off
                 _invoked_llm = _forced_pf or llm_with_tools
+            elif force_fmp:
+                _forced_fmp = (
+                    llm_force_fmp_calendar_on if force_fmp_calendar else llm_force_fmp_stock_on
+                ) if sandbox_enabled else (
+                    llm_force_fmp_calendar_off if force_fmp_calendar else llm_force_fmp_stock_off
+                )
+                _invoked_llm = _forced_fmp or llm_with_tools
             elif force_tavily:
                 _ft = llm_force_tavily_on if sandbox_enabled else llm_force_tavily_off
                 _invoked_llm = _ft or llm_with_tools
@@ -2927,6 +3019,7 @@ def build_worker_graph(
         from duckclaw.utils.formatters import format_reddit_mcp_reply_if_applicable
         from duckclaw.utils import format_tool_reply
         from duckclaw.forge.atoms.user_reply_nl_synthesis import (
+            finanz_repair_ibkr_snapshot_disconnect_paraphrase,
             incoming_has_context_summarize_directive,
             maybe_synthesize_reply,
             repair_summarize_new_context_egress,
@@ -2991,6 +3084,13 @@ def build_worker_graph(
         def _apply_nl_synthesis(candidate: str) -> str:
             return maybe_synthesize_reply(llm, spec=spec, user_ask=_nl_user_ask(), reply_candidate=candidate)
 
+        def _repair_finanz_ibkr_egress(candidate: str) -> str:
+            return finanz_repair_ibkr_snapshot_disconnect_paraphrase(
+                msgs,
+                candidate,
+                worker_id=str(getattr(spec, "worker_id", "") or ""),
+            )
+
         if not msgs:
             out_empty = {**state, "reply": "Sin respuesta generada."}
             out_empty.update(_identity_fields(state))
@@ -3029,7 +3129,9 @@ def build_worker_graph(
                     _parts.append(f"### {name}\n{format_tool_reply(result)}")
                 _combined = "\n\n".join(_parts)
                 _notify_final_heartbeat()
-                _formatted = sanitize_worker_reply_text(_apply_nl_synthesis(_combined))
+                _formatted = sanitize_worker_reply_text(
+                    _repair_finanz_ibkr_egress(_apply_nl_synthesis(_combined))
+                )
                 out_tool = {**state, "reply": _formatted, "internal_reply": _formatted, "messages": msgs}
                 out_tool.update(_identity_fields(state))
                 return out_tool
@@ -3051,7 +3153,7 @@ def build_worker_graph(
                 out_err = {**state, "reply": _ee, "messages": msgs}
                 out_err.update(_identity_fields(state))
                 return out_err
-        reply = _apply_nl_synthesis(reply or "")
+        reply = _repair_finanz_ibkr_egress(_apply_nl_synthesis(reply or ""))
         _rescind_incoming = state_evidence_for_context_summary_rescind(state)
         reply = rescind_trivial_context_summary_reply(
             llm, spec, incoming=_rescind_incoming, reply_candidate=reply or ""
